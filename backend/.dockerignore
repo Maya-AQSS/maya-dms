@@ -11,6 +11,7 @@ node_modules/
 .env.*
 !.env.example
 composer.local.json
+composer.local.dist.json
 auth.json
 
 # Git y herramientas de desarrollo.

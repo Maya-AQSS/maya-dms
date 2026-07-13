@@ -21,6 +21,7 @@ spec:
         app.kubernetes.io/component: reverb
       annotations:
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- include "maya-dms.vaultAnnotations" . | nindent 8 }}
     spec:
       terminationGracePeriodSeconds: {{ .Values.reverb.terminationGracePeriodSeconds }}
       imagePullSecrets:

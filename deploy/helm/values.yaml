@@ -10,14 +10,42 @@ serviceName: "dms"          # usado en hosts e identificadores
 namespace: "maya-dms"
 
 image:
-  registry: "gitea.ceedcv.es"
+  # Registry de producción según IaC (rama helm): ingress registry.ceedcv.es →
+  # backend 172.29.71.240:5000. Los nodos k3s lo resuelven vía registries.yaml.
+  registry: "registry.ceedcv.es"
   repository: "maya"          # imagenes: <registry>/<repository>/maya-dms-{backend,frontend}
   # Tag por defecto vacío: el deploy DEBE pasar `--set image.tag=$(git rev-parse --short HEAD)`.
   # `latest` con IfNotPresent provoca split-brain entre nodos (algunos cachean
   # versiones obsoletas mientras otros pullean la nueva).
   tag: ""
   pullPolicy: IfNotPresent
+  # Secret para pull desde el registry. Creado fuera del chart:
+  #   kubectl -n maya-dms create secret docker-registry regcred \
+  #     --docker-server=registry.ceedcv.es --docker-username=<u> --docker-password=<t>
   pullSecret: "regcred"
+
+# ─── Vault (inyección de secretos según IaC) ──────────────────────────────
+# El Vault Agent Injector (namespace vault-system) renderiza secret/data/maya-dms
+# en /vault/secrets/config y el entrypoint hace `source`. Requisitos operativos:
+#   1. `vault kv put secret/maya-dms APP_KEY=... DB_PASSWORD=... ...`
+#   2. El rol `vault-k8s-role` debe autorizar la SA `default` del namespace maya-dms.
+# Con vault.enabled=false se vuelve al Secret k8s clásico (secret.* de abajo).
+vault:
+  enabled: true
+  role: vault-k8s-role
+  secretPath: secret/data/maya-dms
+  # Claves leídas desde Vault (deben existir en secret/data/maya-dms).
+  keys:
+    - APP_KEY
+    - DB_USERNAME
+    - DB_PASSWORD
+    - REDIS_PASSWORD
+    - RABBITMQ_PASSWORD
+    - KEYCLOAK_CLIENT_SECRET
+    - REVERB_APP_KEY
+    - REVERB_APP_SECRET
+    - FDW_USERS_PASSWORD
+    - FDW_USER_PERMISSIONS_PASSWORD
 
 # ─── Backend (API + WeasyPrint) ───────────────────────────────────────────────
 backend:
@@ -60,7 +88,7 @@ frontend:
   enabled: true
   replicas: 2
   containerName: maya-dms-frontend
-  port: 80
+  port: 8080                    # nginx non-root (uid 101) — no puede bind <1024
   resources:
     requests:
       cpu: 50m
@@ -153,7 +181,9 @@ ingress:
   tls:
     enabled: true
     secretName: maya-dms-tls   # cert de la CA interna, gestionado por cert-manager o manual
-  annotations: {}
+  annotations:
+    # CA interna del clúster (ClusterIssuer definido en IaC cert-manager-ca.yaml).
+    cert-manager.io/cluster-issuer: maya-internal-ca
 
 # ─── ConfigMap (no sensible) ──────────────────────────────────────────────────
 # Endpoints reales de la infra interna; los secretos van aparte.
@@ -175,7 +205,7 @@ config:
 
   # Redis
   REDIS_CLIENT: "phpredis"
-  REDIS_HOST: "redis.maya-infra.svc.cluster.local"
+  REDIS_HOST: "redis-cache-maya-app.maya-infra.svc.cluster.local"
   REDIS_PORT: "6379"
   REDIS_DB: "0"
 
@@ -188,13 +218,13 @@ config:
   SESSION_SAME_SITE: "lax"
 
   # JWT / JWKS — Keycloak realm maya
-  JWKS_URL: "http://keycloak.maya-infra.svc.cluster.local:8080/realms/maya/protocol/openid-connect/certs"
+  JWKS_URL: "http://keycloak-maya-app.maya-iam.svc.cluster.local:8080/realms/maya/protocol/openid-connect/certs"
   JWT_AUDIENCE: "maya-dms"
   JWT_ISSUER: "https://keycloak.ceedcv.es/realms/maya"
   JWKS_CACHE_TTL: "3600"
 
   # RabbitMQ
-  RABBITMQ_HOST: "rabbitmq.maya-infra.svc.cluster.local"
+  RABBITMQ_HOST: "rabbitmq-maya-app.maya-sync.svc.cluster.local"
   RABBITMQ_PORT: "5672"
   RABBITMQ_USER: "maya_dms"
   RABBITMQ_VHOST: "/maya_dms"
@@ -238,7 +268,7 @@ config:
   TEAM_MANAGEMENT_ROLES: "manager,super-admin,admin"
 
   # Acceso este-oeste a maya_authorization (servicio interno).
-  AUTH_EXTERNAL_URL: "http://maya-auth-backend.maya-authz.svc.cluster.local:8000"
+  AUTH_EXTERNAL_URL: "http://maya-auth-backend.maya-authorization.svc.cluster.local:8000"
 
 # ─── Secret (placeholders — sustituir en deploy desde fichero local o SealedSecret) ──
 # IMPORTANTE: NO commitear los valores reales. Estos son placeholders documentales
@@ -280,7 +310,15 @@ networkPolicy:
   enabled: true
   # CIDR de Traefik (ajustar si MetalLB usa otro pool).
   traefikNamespace: "kube-system"
-  # CIDRs externos permitidos como destino (Patroni, NFS, Keycloak, RabbitMQ, Redis).
+  # Namespaces autorizados para EGRESS pod-to-pod (in-cluster east-west). Limita
+  # el blast radius si un pod en maya-dms queda comprometido: solo podrá hablar
+  # con estos NS, no con kube-system u otros tenants.
+  egressNamespaces:
+    - maya-infra            # Redis (release redis-cache del maya-app chart)
+    - maya-sync             # RabbitMQ (release rabbitmq-maya-app)
+    - maya-iam              # Keycloak (release keycloak-maya-app)
+    - maya-authorization    # east-west API authz (maya_authorization)
+  # CIDRs externos permitidos como destino (Patroni VIP, NFS).
   egressCidrs:
     - "172.29.71.0/24"
     - "172.29.70.7/32"

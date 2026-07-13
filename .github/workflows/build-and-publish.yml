@@ -1,0 +1,83 @@
+name: build-and-publish
+
+# Construye las imágenes de producción (backend + frontend) y publica el chart
+# Helm como artefacto OCI en el registry interno registry.ceedcv.es.
+# Corre en el runner self-hosted `local-builder`. k3s despliega SOLO desde el
+# registry (imágenes + chart OCI), nada desde git.
+#
+# Secrets requeridos (repo o org Maya-AQSS):
+#   REGISTRY_USERNAME / REGISTRY_PASSWORD   credenciales del registry
+#   VITE_REVERB_APP_KEY                      clave pública de Reverb; DEBE
+#                                            coincidir con REVERB_APP_KEY en Vault
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Versión semver (sin 'v'), p. ej. 1.4.0"
+        required: true
+
+env:
+  REGISTRY: registry.ceedcv.es
+  APP: maya-dms
+  DOCKER_BUILDKIT: "1"
+
+jobs:
+  build-and-publish:
+    runs-on: [self-hosted, local-builder]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolver versión
+        run: |
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            echo "VERSION=${{ github.event.inputs.version }}" >> "$GITHUB_ENV"
+          else
+            echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+          fi
+
+      - name: Login en el registry (docker + helm OCI)
+        run: |
+          echo "${{ secrets.REGISTRY_PASSWORD }}" | docker login "$REGISTRY" \
+            -u "${{ secrets.REGISTRY_USERNAME }}" --password-stdin
+          echo "${{ secrets.REGISTRY_PASSWORD }}" | helm registry login "$REGISTRY" \
+            -u "${{ secrets.REGISTRY_USERNAME }}" --password-stdin
+
+      - name: Build & push backend
+        run: |
+          IMG="$REGISTRY/maya/$APP-backend"
+          docker build -f backend/Dockerfile.prod \
+            -t "$IMG:$VERSION" -t "$IMG:latest" backend
+          docker push "$IMG:$VERSION"
+          docker push "$IMG:latest"
+
+      - name: Build & push frontend
+        run: |
+          IMG="$REGISTRY/maya/$APP-frontend"
+          docker build -f frontend/Dockerfile.prod \
+            --build-arg VITE_API_URL="https://dms-api.ceedcv.es/api/v1" \
+            --build-arg VITE_KEYCLOAK_URL="https://keycloak.ceedcv.es" \
+            --build-arg VITE_KEYCLOAK_REALM="maya" \
+            --build-arg VITE_KEYCLOAK_CLIENT_ID="maya-dms" \
+            --build-arg VITE_REVERB_HOST="dms-reverb.ceedcv.es" \
+            --build-arg VITE_REVERB_KEY="${{ secrets.VITE_REVERB_APP_KEY }}" \
+            --build-arg VITE_REVERB_PORT="443" \
+            --build-arg VITE_REVERB_SCHEME="https" \
+            -t "$IMG:$VERSION" -t "$IMG:latest" frontend
+          docker push "$IMG:$VERSION"
+          docker push "$IMG:latest"
+
+      - name: Package & push del chart Helm (OCI)
+        run: |
+          helm package deploy/helm --version "$VERSION" --app-version "$VERSION" -d /tmp/chart
+          helm push /tmp/chart/${APP}-${VERSION}.tgz "oci://$REGISTRY/charts"
+
+      - name: Resumen
+        run: |
+          echo "Publicado en $REGISTRY:" >> "$GITHUB_STEP_SUMMARY"
+          echo "- maya/$APP-backend:$VERSION" >> "$GITHUB_STEP_SUMMARY"
+          echo "- maya/$APP-frontend:$VERSION" >> "$GITHUB_STEP_SUMMARY"
+          echo "- charts/$APP:$VERSION (OCI)" >> "$GITHUB_STEP_SUMMARY"

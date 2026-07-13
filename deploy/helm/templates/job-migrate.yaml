@@ -23,6 +23,8 @@ spec:
       labels:
         {{- include "maya-dms.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: migrate
+      annotations:
+        {{- include "maya-dms.vaultAnnotations" . | nindent 8 }}
     spec:
       restartPolicy: Never
       imagePullSecrets:

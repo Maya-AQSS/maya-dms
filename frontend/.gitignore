@@ -13,7 +13,6 @@ dist-ssr
 .vite
 .vite-cache
 *.local
-package-lock.json
 
 # Variables locales (JWT, URLs).
 .env

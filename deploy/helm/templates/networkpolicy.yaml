@@ -41,7 +41,7 @@ spec:
           port: {{ .Values.reverb.port }}
 ---
 # Egress: permitir DNS + tráfico hacia infra externa (Patroni, NFS, Keycloak,
-# RabbitMQ, Redis) y este-oeste hacia maya-authz.
+# RabbitMQ, Redis) y este-oeste hacia maya-authorization.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -66,19 +66,14 @@ spec:
           port: 53
         - protocol: TCP
           port: 53
-    # Este-oeste a maya-authz.
+    # Este-oeste a infra in-cluster: Redis (maya-infra), RabbitMQ (maya-sync),
+    # Keycloak (maya-iam) y API authz (maya-authorization). Lista en values.egressNamespaces.
+{{- range .Values.networkPolicy.egressNamespaces }}
     - to:
         - namespaceSelector:
             matchLabels:
-              kubernetes.io/metadata.name: maya-authz
-      ports:
-        - protocol: TCP
-          port: 8000
-    # Este-oeste a infra in-cluster (Redis, RabbitMQ, Keycloak en maya-infra).
-    - to:
-        - namespaceSelector:
-            matchLabels:
-              kubernetes.io/metadata.name: maya-infra
+              kubernetes.io/metadata.name: {{ . | quote }}
+{{- end }}
     # Egress a infra externa por CIDR (Patroni VIP, NFS, Keycloak host real).
     - to:
 {{- range .Values.networkPolicy.egressCidrs }}

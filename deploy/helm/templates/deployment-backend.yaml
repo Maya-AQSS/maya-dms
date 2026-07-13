@@ -26,6 +26,7 @@ spec:
         # Forzar rollout cuando cambia ConfigMap o Secret.
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
         checksum/nginx: {{ include (print $.Template.BasePath "/configmap-nginx.yaml") . | sha256sum }}
+        {{- include "maya-dms.vaultAnnotations" . | nindent 8 }}
     spec:
       terminationGracePeriodSeconds: {{ .Values.rollout.terminationGracePeriodSeconds }}
       imagePullSecrets:

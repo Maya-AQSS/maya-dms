@@ -56,13 +56,40 @@ Nombre del Secret (separado del ConfigMap por si se carga externamente).
 {{- end -}}
 
 {{/*
-envFrom estándar (ConfigMap + Secret).
+Variables env desde ConfigMap (+ Secret cuando Vault está deshabilitado).
+Con `vault.enabled=true` los secretos llegan por fichero /vault/secrets/config
+(lo carga el entrypoint), así que NO se monta el secretRef.
 */}}
 {{- define "maya-dms.envFrom" -}}
 - configMapRef:
     name: {{ include "maya-dms.configMapName" . }}
+{{- if not .Values.vault.enabled }}
 - secretRef:
     name: {{ include "maya-dms.secretName" . }}
+{{- end }}
+{{- end -}}
+
+{{/*
+Anotaciones para el Vault Agent Injector (según IaC: rama helm del repo IaC).
+El init container de Vault renderiza secret/data/<app> en /vault/secrets/config
+como líneas `export VAR="..."`; el entrypoint de producción hace `source`.
+`agent-pre-populate-only` evita el sidecar persistente: los secretos se cargan
+en el arranque (source-once), coherente con readOnlyRootFilesystem.
+Se inyecta en las anotaciones de pod de cada workload (backend/worker/reverb/migrate).
+*/}}
+{{- define "maya-dms.vaultAnnotations" -}}
+{{- if .Values.vault.enabled -}}
+vault.hashicorp.com/agent-inject: "true"
+vault.hashicorp.com/agent-pre-populate-only: "true"
+vault.hashicorp.com/role: {{ .Values.vault.role | quote }}
+vault.hashicorp.com/agent-inject-secret-config: {{ .Values.vault.secretPath | quote }}
+vault.hashicorp.com/agent-inject-template-config: |
+{{ printf "  {{- with secret %s -}}" (.Values.vault.secretPath | quote) }}
+{{- range .Values.vault.keys }}
+{{ printf "  export %s=\"{{ .Data.data.%s }}\"" . . }}
+{{- end }}
+{{ printf "  {{- end -}}" }}
+{{- end -}}
 {{- end -}}
 
 {{/*
